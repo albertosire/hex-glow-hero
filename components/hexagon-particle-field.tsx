@@ -28,11 +28,11 @@ varying float vHover;
 void main() {
   float distanceToCenter = length(gl_PointCoord - 0.5);
   float core = smoothstep(0.2, 0.0, distanceToCenter);
-  float halo = smoothstep(0.5, 0.05, distanceToCenter);
+  float halo = smoothstep(0.5, 0.04, distanceToCenter);
   vec3 color = mix(uColor, vec3(1.0), vHover * 0.8);
-  float alpha = core * (0.8 + vHover * 0.2) + halo * vHover * 0.35;
+  float alpha = core * (0.9 + vHover * 0.1) + halo * (0.08 + vHover * 0.5);
   if (alpha < 0.01) discard;
-  gl_FragColor = vec4(color * (1.0 + vHover * 1.8), alpha);
+  gl_FragColor = vec4(color * (1.0 + vHover * 2.0), alpha);
 }
 `
 
@@ -100,7 +100,7 @@ function HexNodes({
   useFrame(() => {
     if (!materialRef.current) return
     materialRef.current.uniforms.uPointer.value.copy(pointer.current)
-    materialRef.current.uniforms.uPointerActive.value = pointer.current.x < 100 ? 1 : 0
+    materialRef.current.uniforms.uPointerActive.value = pointer.current.x < 100 ? 0 : 1
   })
 
   return (
@@ -134,7 +134,7 @@ function BackgroundGlow({ pointer }: { pointer: React.RefObject<THREE.Vector2> }
   useFrame(() => {
     if (!materialRef.current) return
     materialRef.current.uniforms.uPointer.value.copy(pointer.current)
-    materialRef.current.uniforms.uPointerActive.value = pointer.current.x < 100 ? 1 : 0
+    materialRef.current.uniforms.uPointerActive.value = pointer.current.x < 100 ? 0 : 1
   })
 
   return (
@@ -165,9 +165,9 @@ export function HexagonParticleField() {
       onPointerOut={() => pointer.current.set(999, 999)}
     >
       <BackgroundGlow pointer={pointer} />
-      <mesh position={[0, 0, 0.5]} visible={false}>
+      <mesh position={[0, 0, 0.5]} renderOrder={1}>
         <planeGeometry args={[viewport.width, viewport.height]} />
-        <meshBasicMaterial />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
       <HexNodes points={outerPoints} pointer={pointer} color={color} size={0.18} />
       <HexNodes points={innerPoints} pointer={pointer} color={color} size={0.22} />
