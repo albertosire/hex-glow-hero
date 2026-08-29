@@ -4,317 +4,174 @@ import { useMemo, useRef } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 
-/**
- * Builds points that trace the outline of a regular hexagon (flat-top),
- * with slight randomized jitter and per-point size/phase attributes for
- * the shader to animate.
- */
-function buildHexRingPoints(opts: {
-  radius: number
-  count: number
-  bandWidth: number
-  rotation?: number
-  seed?: number
-}) {
-  const { radius, count, bandWidth, rotation = 0, seed = 1 } = opts
-  const positions = new Float32Array(count * 3)
-  const sizes = new Float32Array(count)
-  const phases = new Float32Array(count)
-  const edgeIndex = new Float32Array(count)
-
-  // deterministic pseudo-random
-  let s = seed
-  const rand = () => {
-    s = (s * 16807) % 2147483647
-    return s / 2147483647
-  }
-
-  const corners: [number, number][] = []
-  for (let i = 0; i < 6; i++) {
-    const a = rotation + (Math.PI / 3) * i
-    corners.push([Math.cos(a) * radius, Math.sin(a) * radius])
-  }
-
-  for (let i = 0; i < count; i++) {
-    const edge = i % 6
-    const t = rand()
-    const [x1, y1] = corners[edge]
-    const [x2, y2] = corners[(edge + 1) % 6]
-
-    let x = x1 + (x2 - x1) * t
-    let y = y1 + (y2 - y1) * t
-
-    // push points slightly inward/outward across a band to give the
-    // outline some volume rather than a razor-thin line
-    const nx = y2 - y1
-    const ny = -(x2 - x1)
-    const nl = Math.sqrt(nx * nx + ny * ny) || 1
-    const jitter = (rand() - 0.5) * bandWidth
-    x += (nx / nl) * jitter
-    y += (ny / nl) * jitter
-
-    const z = (rand() - 0.5) * bandWidth * 0.6
-
-    positions[i * 3] = x
-    positions[i * 3 + 1] = y
-    positions[i * 3 + 2] = z
-
-    sizes[i] = 0.55 + rand() * 1.05
-    phases[i] = rand() * Math.PI * 2
-    edgeIndex[i] = edge
-  }
-
-  return { positions, sizes, phases, edgeIndex }
-}
-
-/** Points scattered inside the hexagon (used for the inner core glow) */
-function buildHexFillPoints(opts: { radius: number; count: number; seed?: number }) {
-  const { radius, count, seed = 7 } = opts
-  const positions = new Float32Array(count * 3)
-  const sizes = new Float32Array(count)
-  const phases = new Float32Array(count)
-  const edgeIndex = new Float32Array(count)
-
-  let s = seed
-  const rand = () => {
-    s = (s * 48271) % 2147483647
-    return s / 2147483647
-  }
-
-  const isInHex = (x: number, y: number) => {
-    const q2x = Math.abs(x)
-    const q2y = Math.abs(y)
-    const h = radius * Math.sqrt(3) / 2
-    if (q2x > radius || q2y > h) return false
-    return h * radius - h * q2x - (radius / 2) * q2y >= 0
-  }
-
-  let i = 0
-  let guard = 0
-  while (i < count && guard < count * 40) {
-    guard++
-    const x = (rand() * 2 - 1) * radius
-    const y = (rand() * 2 - 1) * radius
-    if (!isInHex(x, y)) continue
-    // bias density toward center using a power falloff
-    const distNorm = Math.sqrt(x * x + y * y) / radius
-    if (rand() > Math.pow(1 - distNorm, 0.6) + 0.05) continue
-
-    positions[i * 3] = x
-    positions[i * 3 + 1] = y
-    positions[i * 3 + 2] = (rand() - 0.5) * radius * 0.25
-    sizes[i] = 0.4 + rand() * 0.8
-    phases[i] = rand() * Math.PI * 2
-    edgeIndex[i] = 0
-    i++
-  }
-
-  return { positions, sizes, phases, edgeIndex, actualCount: i }
-}
-
 const vertexShader = /* glsl */ `
-  uniform float uTime;
-  uniform float uPixelRatio;
-  uniform vec2 uPointer;
-  uniform float uPointerStrength;
-  uniform float uPulse;
+uniform vec2 uPointer;
+uniform float uPointerActive;
+uniform float uPointSize;
+varying float vHover;
 
-  attribute float aSize;
-  attribute float aPhase;
-
-  varying float vPhase;
-  varying float vDist;
-
-  void main() {
-    vec3 pos = position;
-
-    // gentle breathing displacement along the outward normal direction
-    float breathe = sin(uTime * 0.6 + aPhase) * 0.06;
-    pos.xy *= (1.0 + breathe * 0.02);
-    pos.z += sin(uTime * 0.8 + aPhase * 2.0) * 0.12;
-
-    // pointer repulsion in screen-projected xy space (approximated in local space)
-    vec2 toPoint = pos.xy - uPointer;
-    float d = length(toPoint);
-    float falloff = smoothstep(1.1, 0.0, d);
-    pos.xy += normalize(toPoint + 0.0001) * falloff * uPointerStrength;
-    pos.z += falloff * uPointerStrength * 0.6;
-
-    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-    gl_PointSize = aSize * uPixelRatio * (1.0 + uPulse * 0.35 + falloff * 0.8) * (40.0 / -mvPosition.z);
-    gl_Position = projectionMatrix * mvPosition;
-
-    vPhase = aPhase;
-    vDist = d;
-  }
+void main() {
+  vec3 pos = position;
+  float distanceToPointer = distance(pos.xy, uPointer);
+  vHover = smoothstep(0.75, 0.0, distanceToPointer) * uPointerActive;
+  vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+  gl_PointSize = uPointSize * (1.0 + vHover * 1.5) * (42.0 / -mvPosition.z);
+  gl_Position = projectionMatrix * mvPosition;
+}
 `
 
 const fragmentShader = /* glsl */ `
-  precision highp float;
+precision highp float;
+uniform vec3 uColor;
+varying float vHover;
 
-  uniform vec3 uColorA;
-  uniform vec3 uColorB;
-  uniform float uTime;
-
-  varying float vPhase;
-  varying float vDist;
-
-  void main() {
-    vec2 uv = gl_PointCoord - vec2(0.5);
-    float d = length(uv);
-    float core = smoothstep(0.22, 0.0, d);
-    float glow = smoothstep(0.5, 0.22, d);
-    float alpha = clamp(core * 1.1 + glow * 0.22, 0.0, 1.0);
-
-    float mixAmt = 0.5 + 0.5 * sin(uTime * 0.35 + vPhase);
-    vec3 color = mix(uColorA, uColorB, mixAmt);
-
-    // brighten hot core
-    color += vec3(1.0) * core * 0.3;
-
-    if (alpha < 0.02) discard;
-    gl_FragColor = vec4(color, alpha);
-  }
+void main() {
+  float distanceToCenter = length(gl_PointCoord - 0.5);
+  float core = smoothstep(0.2, 0.0, distanceToCenter);
+  float halo = smoothstep(0.5, 0.05, distanceToCenter);
+  vec3 color = mix(uColor, vec3(1.0), vHover * 0.8);
+  float alpha = core * (0.8 + vHover * 0.2) + halo * vHover * 0.35;
+  if (alpha < 0.01) discard;
+  gl_FragColor = vec4(color * (1.0 + vHover * 1.8), alpha);
+}
 `
 
-function HexLayer({
+const backgroundVertexShader = /* glsl */ `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`
+
+const backgroundFragmentShader = /* glsl */ `
+precision highp float;
+uniform vec2 uPointer;
+uniform float uPointerActive;
+uniform vec2 uResolution;
+varying vec2 vUv;
+
+void main() {
+  vec2 world = (vUv - 0.5) * uResolution;
+  float light = 0.0;
+  float pointerDistance = distance(world, uPointer);
+  light += smoothstep(2.6, 0.0, pointerDistance) * uPointerActive;
+  vec3 base = vec3(0.025, 0.025, 0.03);
+  vec3 illuminated = vec3(0.28, 0.28, 0.3) * light;
+  gl_FragColor = vec4(base + illuminated, 1.0);
+}
+`
+
+function hexagonVertices(radius: number, z: number, rotation = Math.PI / 6) {
+  return Array.from({ length: 6 }, (_, index) => {
+    const angle = rotation + (Math.PI / 3) * index
+    return new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius, z)
+  })
+}
+
+function HexNodes({
   points,
-  colorA,
-  colorB,
   pointer,
-  pointerStrength = 0.9,
-  pulse,
-  opacity = 1,
+  color,
+  size,
 }: {
-  points: { positions: Float32Array; sizes: Float32Array; phases: Float32Array }
-  colorA: THREE.Color
-  colorB: THREE.Color
+  points: THREE.Vector3[]
   pointer: React.RefObject<THREE.Vector2>
-  pointerStrength?: number
-  pulse: React.RefObject<number>
-  opacity?: number
+  color: THREE.Color
+  size: number
 }) {
   const materialRef = useRef<THREE.ShaderMaterial>(null)
-
   const geometry = useMemo(() => {
-    const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.BufferAttribute(points.positions, 3))
-    geo.setAttribute('aSize', new THREE.BufferAttribute(points.sizes, 1))
-    geo.setAttribute('aPhase', new THREE.BufferAttribute(points.phases, 1))
-    return geo
+    const next = new THREE.BufferGeometry()
+    next.setFromPoints(points)
+    return next
   }, [points])
 
   const uniforms = useMemo(
     () => ({
-      uTime: { value: 0 },
-      uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) },
       uPointer: { value: new THREE.Vector2(999, 999) },
-      uPointerStrength: { value: pointerStrength },
-      uPulse: { value: 0 },
-      uColorA: { value: colorA },
-      uColorB: { value: colorB },
+      uPointerActive: { value: 0 },
+      uPointSize: { value: size },
+      uColor: { value: color },
     }),
-    [colorA, colorB, pointerStrength],
+    [color, size],
   )
 
-  useFrame((state) => {
+  useFrame(() => {
     if (!materialRef.current) return
-    materialRef.current.uniforms.uTime.value = state.clock.elapsedTime
     materialRef.current.uniforms.uPointer.value.copy(pointer.current)
-    materialRef.current.uniforms.uPulse.value = pulse.current
-    materialRef.current.uniforms.uPixelRatio.value = Math.min(window.devicePixelRatio, 2)
+    materialRef.current.uniforms.uPointerActive.value = pointer.current.x < 100 ? 1 : 0
   })
 
   return (
-    <points geometry={geometry}>
+    <points geometry={geometry} renderOrder={2}>
       <shaderMaterial
         ref={materialRef}
         vertexShader={vertexShader}
         fragmentShader={fragmentShader}
         uniforms={uniforms}
         transparent
-        depthWrite={false}
+        depthWrite
+        depthTest
         blending={THREE.AdditiveBlending}
-        opacity={opacity}
       />
     </points>
   )
 }
 
-/** Thin hexagon line outline rendered with LineLoop for crisp geometric edges */
-function HexOutline({
-  radius,
-  rotation = 0,
-  color,
-  opacity = 0.5,
-}: {
-  radius: number
-  rotation?: number
-  color: string
-  opacity?: number
-}) {
-  const points = useMemo(() => {
-    const pts: THREE.Vector3[] = []
-    for (let i = 0; i <= 6; i++) {
-      const a = rotation + (Math.PI / 3) * i
-      pts.push(new THREE.Vector3(Math.cos(a) * radius, Math.sin(a) * radius, 0))
-    }
-    return pts
-  }, [radius, rotation])
+function BackgroundGlow({ pointer }: { pointer: React.RefObject<THREE.Vector2> }) {
+  const materialRef = useRef<THREE.ShaderMaterial>(null)
+  const { viewport } = useThree()
+  const uniforms = useMemo(
+    () => ({
+      uPointer: { value: new THREE.Vector2(999, 999) },
+      uPointerActive: { value: 0 },
+      uResolution: { value: new THREE.Vector2(viewport.width, viewport.height) },
+    }),
+    [viewport.width, viewport.height],
+  )
 
-  const geometry = useMemo(() => new THREE.BufferGeometry().setFromPoints(points), [points])
+  useFrame(() => {
+    if (!materialRef.current) return
+    materialRef.current.uniforms.uPointer.value.copy(pointer.current)
+    materialRef.current.uniforms.uPointerActive.value = pointer.current.x < 100 ? 1 : 0
+  })
 
   return (
-    <lineLoop geometry={geometry}>
-      <lineBasicMaterial color={color} transparent opacity={opacity} />
-    </lineLoop>
+    <mesh position={[0, 0, -0.8]} renderOrder={0}>
+      <planeGeometry args={[viewport.width, viewport.height]} />
+      <shaderMaterial
+        ref={materialRef}
+        vertexShader={backgroundVertexShader}
+        fragmentShader={backgroundFragmentShader}
+        uniforms={uniforms}
+        depthWrite
+        depthTest
+      />
+    </mesh>
   )
 }
 
 export function HexagonParticleField() {
   const pointer = useRef(new THREE.Vector2(999, 999))
-  const pulse = useRef(0)
   const { viewport } = useThree()
-
-  const outerRing = useMemo(
-    () => buildHexRingPoints({ radius: 2.9, count: 2600, bandWidth: 0.1, rotation: 0, seed: 11 }),
-    [],
-  )
-  const innerRing = useMemo(
-    () => buildHexRingPoints({ radius: 1.7, count: 1600, bandWidth: 0.07, rotation: Math.PI / 6, seed: 29 }),
-    [],
-  )
-  const core = useMemo(() => buildHexFillPoints({ radius: 1.35, count: 700, seed: 53 }), [])
-
-  const colorSoft = useMemo(() => new THREE.Color('#f2f2f2'), [])
-
-  useFrame((state) => {
-    pulse.current = 0.5 + 0.5 * Math.sin(state.clock.elapsedTime * 0.9)
-  })
+  const outerPoints = useMemo(() => hexagonVertices(2.9, 0), [])
+  const innerPoints = useMemo(() => hexagonVertices(1.7, 0.08), [])
+  const color = useMemo(() => new THREE.Color('#ededed'), [])
 
   return (
     <group
-      onPointerMove={(e) => {
-        pointer.current.set(e.point.x, e.point.y)
-      }}
-      onPointerOut={() => {
-        pointer.current.set(999, 999)
-      }}
+      onPointerMove={(event) => pointer.current.set(event.point.x, event.point.y)}
+      onPointerOut={() => pointer.current.set(999, 999)}
     >
-      {/* invisible plane to capture pointer coordinates across the full viewport */}
-      <mesh position={[0, 0, 0]} visible={false}>
-        <planeGeometry args={[viewport.width * 1.4, viewport.height * 1.4]} />
+      <BackgroundGlow pointer={pointer} />
+      <mesh position={[0, 0, 0.5]} visible={false}>
+        <planeGeometry args={[viewport.width, viewport.height]} />
         <meshBasicMaterial />
       </mesh>
-
-      <group>
-        <HexOutline radius={2.9} color="#f2f2f2" opacity={0.16} />
-        <HexOutline radius={1.7} color="#a1a1aa" opacity={0.14} />
-
-        <HexLayer points={outerRing} colorA={colorSoft} colorB={colorSoft} pointer={pointer} pointerStrength={0.4} pulse={pulse} opacity={0.85} />
-        <HexLayer points={innerRing} colorA={colorSoft} colorB={colorSoft} pointer={pointer} pointerStrength={0.55} pulse={pulse} opacity={0.8} />
-        <HexLayer points={core} colorA={colorSoft} colorB={colorSoft} pointer={pointer} pointerStrength={0.7} pulse={pulse} opacity={0.45} />
-      </group>
+      <HexNodes points={outerPoints} pointer={pointer} color={color} size={0.18} />
+      <HexNodes points={innerPoints} pointer={pointer} color={color} size={0.22} />
     </group>
   )
 }
+
